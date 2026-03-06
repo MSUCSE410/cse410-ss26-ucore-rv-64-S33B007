@@ -3,6 +3,7 @@
 #include "loader.h"
 #include "trap.h"
 #include "vm.h"
+#include "timer.h"
 
 struct proc pool[NPROC];
 __attribute__((aligned(16))) char kstack[NPROC][PAGE_SIZE];
@@ -33,6 +34,12 @@ void proc_init(void)
 		/*
 		* LAB1: you may need to initialize your new fields of proc here
 		*/
+		// explicitly initialize syscall_times to zero for each process
+		// because the memory allocated for proc might contain garbage values
+		for (int i = 0; i < MAX_SYSCALL_NUM; i++) {
+			p->syscall_times[i] = 0;
+		}
+		p->start_time = 0;
 	}
 	idle.kstack = (uint64)boot_stack_top;
 	idle.pid = 0;
@@ -69,6 +76,13 @@ found:
 	memset((void *)p->trapframe, 0, TRAP_PAGE_SIZE);
 	p->context.ra = (uint64)usertrapret;
 	p->context.sp = p->kstack + KSTACK_SIZE;
+
+	// Initialize syscall counters to zero
+	for (int i = 0; i < MAX_SYSCALL_NUM; i++) {
+		p->syscall_times[i] = 0;
+	}
+	p->start_time = 0;
+
 	return p;
 }
 
@@ -86,6 +100,20 @@ void scheduler(void)
 				/*
 				* LAB1: you may need to init proc start time here
 				*/
+
+				//3) When does a process actually start?
+				// The process starts when it is first scheduled to run, which is when it 
+				// transitions from the RUNNABLE state to the RUNNING state. 
+				// This is the point at which the process begins executing 
+				// instructions on the CPU. Therefore, we should set the start 
+				// time right before we switch to the process's context for the first time.
+				if (p->start_time == 0) {
+					p->start_time = get_cycle(); // record the cycle count at the moment the process starts running
+				}
+
+				// p->info.status = RUNNING;
+				// uint64 cycle = get_cycle();
+				// p->info.time = cycle / CPU_FREQ ;
 				p->state = RUNNING;
 				current_proc = p;
 				swtch(&idle.context, &p->context);
