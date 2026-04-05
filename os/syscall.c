@@ -94,17 +94,125 @@ uint64 sys_wait(int pid, uint64 va)
 
 uint64 sys_spawn(uint64 va)
 {
-	// TODO: your job is to complete the sys call
-	return -1;
+	// a. create filename, current proc, and new proc variables
+	struct proc *p = curr_proc();
+	struct proc *np = NULL;
+	char name[200];
+
+	// b. copy filename from user VA to kernel
+	copyinstr(p->pagetable, name, va, 200);
+
+	// c. find the app id by name
+	int id = get_id_by_name(name);
+	if (id < 0)
+		return -1;
+
+	// d. allocate new process and set parent
+	np = allocproc();
+	if (np == 0)
+		return -1;
+	np->parent = p;
+
+	// e. load the program into the new process
+	loader(id, np);
+
+	// f. add to task queue
+	//add_task(np);
+	np->state = RUNNABLE;
+
+	// g. return the new process's pid
+	return np->pid;
 }
 
 uint64 sys_set_priority(long long prio){
     // TODO: your job is to complete the sys call
-    return -1;
+	if (prio <= 1)
+		return -1;
+
+    struct proc *p = curr_proc();
+	p->priority = prio;
+	p->pass = BIG_STRIDE / p->priority;
+	return p->priority;
 }
 
 
 extern char trap_page[];
+
+// 1.) Syscall ID 222: map anonymous physical memory to user virtual address space
+uint64 sys_mmap(uint64 start, uint64 len, int port, int flag, int fd)
+{
+	if (len == 0)
+		return 0;
+	// Error checks: page-aligned, not too large, valid permission bits
+	if (start % PGSIZE != 0)
+		return -1;
+	if (len > 1024 * 1024 * 1024)
+		return -1;
+	if ((port & ~0x7) != 0) // bits beyond the lowest 3 should not be set
+		return -1;
+	if ((port & 0x7) == 0)  // at least one of R/W/X required
+		return -1;
+
+	struct proc *p = curr_proc();
+	uint64 end = start + len;
+
+	// Check that none of the pages are already mapped
+	for (uint64 a = start; a < end; a += PGSIZE) {
+		if (walkaddr(p->pagetable, a) != 0)
+			return -1;
+	}
+
+	// Convert port bits to RISC-V PTE flags (PTE_U always set for user access)
+	int perm = PTE_U;
+	if (port & 0x1) perm |= PTE_R;
+	if (port & 0x2) perm |= PTE_W;
+	if (port & 0x4) perm |= PTE_X;
+
+	// Allocate a physical page for each VA, zero it, and create the PTE
+	for (uint64 a = start; a < end; a += PGSIZE) {
+		void *pa = kalloc();
+		if (pa == 0)
+			return -1;
+		memset(pa, 0, PGSIZE);
+		if (mappages(p->pagetable, a, PGSIZE, (uint64)pa, perm) != 0) {
+			kfree(pa);
+			return -1;
+		}
+	}
+
+	// Track the highest mapped page for cleanup in uvmfree
+	uint64 new_max = PGROUNDUP(end) / PGSIZE;
+	if (new_max > p->max_page)
+		p->max_page = new_max;
+
+	return 0;
+}
+
+// 2.) Syscall ID 215: unmap a block of virtual memory
+uint64 sys_munmap(uint64 start, uint64 len)
+{
+	if (start % PGSIZE != 0)
+		return -1;
+	if (len == 0)
+		return 0;
+
+	struct proc *p = curr_proc();
+	uint64 va0 = start;
+	uint64 va_end = PGROUNDUP(start + len);
+
+	// Check that all pages in the range are mapped
+	for (uint64 a = va0; a < va_end; a += PGSIZE) {
+		if (walkaddr(p->pagetable, a) == 0)
+			return -1;
+	}
+
+	// Remove PTEs and free the backing physical pages (do_free=1)
+	uint64 npages = (va_end - va0) / PGSIZE;
+	uvmunmap(p->pagetable, va0, npages, 1);
+
+	return 0;
+}
+
 
 void syscall()
 {
@@ -147,6 +255,16 @@ void syscall()
 		break;
 	case SYS_spawn:
 		ret = sys_spawn(args[0]);
+		break;
+	// Switch cases for the new syscalls
+	case SYS_mmap:
+		ret = sys_mmap(args[0], args[1], args[2], args[3], args[4]);
+		break;
+	case SYS_munmap:
+		ret = sys_munmap(args[0], args[1]);
+		break;
+	case SYS_setpriority:
+		ret = sys_set_priority(args[0]);
 		break;
 	default:
 		ret = -1;

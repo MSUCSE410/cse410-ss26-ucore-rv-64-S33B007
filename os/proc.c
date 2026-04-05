@@ -89,6 +89,11 @@ found:
 	memset((void *)p->trapframe, 0, TRAP_PAGE_SIZE);
 	p->context.ra = (uint64)usertrapret;
 	p->context.sp = p->kstack + KSTACK_SIZE;
+
+	// initialize fields for the new syscalls
+	p->stride = 0;
+	p->priority = 16;
+	p->pass = BIG_STRIDE / p->priority;
 	return p;
 }
 
@@ -101,27 +106,25 @@ void scheduler()
 {
 	struct proc *p;
 	for (;;) {
-		/*int has_proc = 0;
+		// a. find the RUNNABLE process with the minimum stride
+		struct proc *min_proc = NULL;
 		for (p = pool; p < &pool[NPROC]; p++) {
 			if (p->state == RUNNABLE) {
-				has_proc = 1;
-				tracef("swtich to proc %d", p - pool);
-				p->state = RUNNING;
-				current_proc = p;
-				swtch(&idle.context, &p->context);
+				if (min_proc == NULL || p->stride < min_proc->stride)
+					min_proc = p;
 			}
 		}
-		if(has_proc == 0) {
-			panic("all app are over!\n");
-		}*/
-		p = fetch_task();
-		if (p == NULL) {
+		if (min_proc == NULL) {
 			panic("all app are over!\n");
 		}
-		tracef("swtich to proc %d", p - pool);
-		p->state = RUNNING;
-		current_proc = p;
-		swtch(&idle.context, &p->context);
+		// b. update stride
+		min_proc->stride += min_proc->pass;
+		// c. set state to running
+		min_proc->state = RUNNING;
+		// d. set current proc
+		current_proc = min_proc;
+		// e. context switch
+		swtch(&idle.context, &min_proc->context);
 	}
 }
 
@@ -144,7 +147,6 @@ void sched()
 void yield()
 {
 	current_proc->state = RUNNABLE;
-	add_task(current_proc);
 	sched();
 }
 
@@ -184,7 +186,7 @@ int fork()
 	np->trapframe->a0 = 0;
 	np->parent = p;
 	np->state = RUNNABLE;
-	add_task(np);
+	//add_task(np);
 	return np->pid;
 }
 
@@ -226,7 +228,7 @@ int wait(int pid, int *code)
 			return -1;
 		}
 		p->state = RUNNABLE;
-		add_task(p);
+		//add_task(p);
 		sched();
 	}
 }
