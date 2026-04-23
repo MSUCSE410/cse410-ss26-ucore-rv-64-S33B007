@@ -64,8 +64,10 @@ struct proc *fetch_task()
 
 void add_task(struct proc *p)
 {
-	push_queue(&task_queue, p - pool);
-	debugf("add task %d(pid=%d) to task queue\n", p - pool, p->pid);
+	// push_queue(&task_queue, p - pool);
+	// debugf("add task %d(pid=%d) to task queue\n", p - pool, p->pid);
+
+	p->state = RUNNABLE;
 }
 
 // Look in the process table for an UNUSED proc.
@@ -96,6 +98,10 @@ found:
 	memset((void *)p->files, 0, sizeof(struct file *) * FD_BUFFER_SIZE);
 	p->context.ra = (uint64)usertrapret;
 	p->context.sp = p->kstack + KSTACK_SIZE;
+	// 2) Stride scheduling init (from project 3)
+	p->stride = 0;
+	p->priority = 16;
+	p->pass = BIG_STRIDE / p->priority;
 	return p;
 }
 
@@ -119,27 +125,21 @@ void scheduler()
 {
 	struct proc *p;
 	for (;;) {
-		/*int has_proc = 0;
+		// 3) Stride scheduling: find RUNNABLE process with minimum stride
+		struct proc *min_proc = NULL;
 		for (p = pool; p < &pool[NPROC]; p++) {
 			if (p->state == RUNNABLE) {
-				has_proc = 1;
-				tracef("swtich to proc %d", p - pool);
-				p->state = RUNNING;
-				current_proc = p;
-				swtch(&idle.context, &p->context);
+				if (min_proc == NULL || p->stride < min_proc->stride)
+					min_proc = p;
 			}
 		}
-		if(has_proc == 0) {
-			panic("all app are over!\n");
-		}*/
-		p = fetch_task();
-		if (p == NULL) {
+		if (min_proc == NULL) {
 			panic("all app are over!\n");
 		}
-		tracef("swtich to proc %d", p - pool);
-		p->state = RUNNING;
-		current_proc = p;
-		swtch(&idle.context, &p->context);
+		min_proc->stride += min_proc->pass;
+		min_proc->state = RUNNING;
+		current_proc = min_proc;
+		swtch(&idle.context, &min_proc->context);
 	}
 }
 
@@ -162,7 +162,7 @@ void sched()
 void yield()
 {
 	current_proc->state = RUNNABLE;
-	add_task(current_proc);
+	//add_task(current_proc);
 	sched();
 }
 

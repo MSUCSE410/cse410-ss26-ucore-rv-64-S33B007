@@ -3,6 +3,7 @@
 #include "defs.h"
 #include "loader.h"
 #include "syscall_ids.h"
+#include "stat.h"
 #include "timer.h"
 #include "trap.h"
 
@@ -142,17 +143,51 @@ uint64 sys_wait(int pid, uint64 va)
 	return wait(pid, code);
 }
 
+// 14) Syscall 400: create a new child process running a named program.
+// Ch6 version: uses the filesystem (namei + bin_loader) instead of
+// ch5's get_id_by_name + loader, and sets up stdio and argv.
 uint64 sys_spawn(uint64 va)
 {
-	// TODO: your job is to complete the sys call
-	return -1;
+	struct proc *p = curr_proc();
+	char name[MAXPATH];
+	copyinstr(p->pagetable, name, va, MAXPATH);
+
+	// Look up the program file in the filesystem
+	struct inode *ip = namei(name);
+	if (ip == 0)
+		return -1;
+
+	// Allocate a new process
+	struct proc *np = allocproc();
+	if (np == 0) {
+		iput(ip);
+		return -1;
+	}
+	np->parent = p;
+
+	// Set up stdin/stdout/stderr for the child
+	init_stdio(np);
+
+	// Load the program binary from the inode into the new process
+	bin_loader(ip, np);
+	iput(ip);
+
+	// Set up argv so main() receives (argc, argv)
+	char *argv[2];
+	argv[0] = name;
+	argv[1] = NULL;
+	np->trapframe->a0 = push_argv(np, argv);
+
+	// Add to scheduler
+	add_task(np);
+	return np->pid;
 }
 
-uint64 sys_set_priority(long long prio)
-{
-	// TODO: your job is to complete the sys call
-	return -1;
-}
+// uint64 sys_set_priority(long long prio)
+// {
+// 	// TODO: your job is to complete the sys call
+// 	return -1;
+// }
 
 uint64 sys_openat(uint64 va, uint64 omode, uint64 _flags)
 {
@@ -177,19 +212,182 @@ uint64 sys_close(int fd)
 	return 0;
 }
 
-int sys_fstat(int fd,uint64 stat){
-	//TODO: your job is to complete the syscall
-	return -1;
+// 4) Stride scheduling priority (from project 3)
+uint64 sys_set_priority(long long prio)
+{
+	if (prio <= 1)
+		return -1;
+	struct proc *p = curr_proc();
+	p->priority = prio;
+	p->pass = BIG_STRIDE / p->priority;
+	return p->priority;
 }
 
-int sys_linkat(int olddirfd, uint64 oldpath, int newdirfd, uint64 newpath, uint64 flags){
-	//TODO: your job is to complete the syscall
-	return -1;
+// Syscall 222: map anonymous physical memory (from project 2)
+uint64 sys_mmap(uint64 start, uint64 len, int port, int flag, int fd)
+{
+	if (len == 0)
+		return 0;
+	if (start % PGSIZE != 0)
+		return -1;
+	if (len > 1024 * 1024 * 1024)
+		return -1;
+	if ((port & ~0x7) != 0)
+		return -1;
+	if ((port & 0x7) == 0)
+		return -1;
+
+	struct proc *p = curr_proc();
+	uint64 end = start + len;
+
+	for (uint64 a = start; a < end; a += PGSIZE) {
+		if (walkaddr(p->pagetable, a) != 0)
+			return -1;
+	}
+
+	int perm = PTE_U;
+	if (port & 0x1) perm |= PTE_R;
+	if (port & 0x2) perm |= PTE_W;
+	if (port & 0x4) perm |= PTE_X;
+
+	for (uint64 a = start; a < end; a += PGSIZE) {
+		void *pa = kalloc();
+		if (pa == 0)
+			return -1;
+		memset(pa, 0, PGSIZE);
+		if (mappages(p->pagetable, a, PGSIZE, (uint64)pa, perm) != 0) {
+			kfree(pa);
+			return -1;
+		}
+	}
+
+	uint64 new_max = PGROUNDUP(end) / PGSIZE;
+	if (new_max > p->max_page)
+		p->max_page = new_max;
+
+	return 0;
 }
 
-int sys_unlinkat(int dirfd, uint64 name, uint64 flags){
-	//TODO: your job is to complete the syscall
-	return -1;
+// Syscall 215: unmap virtual memory (from project 2)
+uint64 sys_munmap(uint64 start, uint64 len)
+{
+	if (start % PGSIZE != 0)
+		return -1;
+	if (len == 0)
+		return 0;
+
+	struct proc *p = curr_proc();
+	uint64 va0 = start;
+	uint64 va_end = PGROUNDUP(start + len);
+
+	for (uint64 a = va0; a < va_end; a += PGSIZE) {
+		if (walkaddr(p->pagetable, a) == 0)
+			return -1;
+	}
+
+	uint64 npages = (va_end - va0) / PGSIZE;
+	uvmunmap(p->pagetable, va0, npages, 1);
+
+	return 0;
+}
+
+// 11) Syscall 80: get file status — returns inode metadata to userspace
+// so user programs can query file metadata
+int sys_fstat(int fd, uint64 stat)
+{
+	// Validate file descriptor
+	if (fd < 0 || fd > FD_BUFFER_SIZE)
+		return -1;
+	struct proc *p = curr_proc();
+	struct file *f = p->files[fd];
+	if (f == NULL || f->type != FD_INODE)
+		return -1;
+
+	// Read inode from disk if not yet loaded
+	struct inode *ip = f->ip;
+	ivalid(ip);
+
+	// Fill the Stat struct with inode metadata
+	Stat st;
+	memset(&st, 0, sizeof(st));
+	st.dev = ip->dev;
+	st.ino = ip->inum;
+	st.nlink = ip->nlink;
+	// Set mode based on inode type (directory vs regular file)
+	if (ip->type == T_DIR)
+		st.mode = ST_DIR;
+	else
+		st.mode = ST_FILE;
+
+	// Copy the struct out to userspace
+	copyout(p->pagetable, stat, (char *)&st, sizeof(Stat));
+	return 0;
+}
+
+// 12) Syscall 37: create a hard link — adds a new directory entry pointing to
+// the same inode as oldpath, so both names share the same file data on disk
+int sys_linkat(int olddirfd, uint64 oldpath, int newdirfd, uint64 newpath, uint64 flags)
+{
+	struct proc *p = curr_proc();
+	char old[MAXPATH], new[MAXPATH];
+	copyinstr(p->pagetable, old, oldpath, MAXPATH);
+	copyinstr(p->pagetable, new, newpath, MAXPATH);
+
+	// Linking a file to itself is an error
+	if (strncmp(old, new, MAXPATH) == 0)
+		return -1;
+
+	// Look up the original file's inode
+	struct inode *ip = namei(old);
+	if (ip == 0)
+		return -1;
+	ivalid(ip);
+
+	// Increment link count and write back to disk
+	ip->nlink++;
+	iupdate(ip);
+
+	// Add a new directory entry in root dir pointing to same inode
+	struct inode *dp = root_dir();
+	if (dirlink(dp, new, ip->inum) < 0) {
+		// Rollback nlink if dirlink failed
+		ip->nlink--;
+		iupdate(ip);
+		iput(dp);
+		iput(ip);
+		return -1;
+	}
+	iput(dp);
+	iput(ip);
+	return 0;
+}
+
+// 13)Syscall 35: unlink a file — removes the directory entry and decrements
+// the link count. When nlink hits 0, iput() frees the inode and data blocks.
+int sys_unlinkat(int dirfd, uint64 name, uint64 flags)
+{
+	struct proc *p = curr_proc();
+	char path[MAXPATH];
+	copyinstr(p->pagetable, path, name, MAXPATH);
+
+	// Check that the file exists
+	struct inode *ip = namei(path);
+	if (ip == 0)
+		return -1;
+	ivalid(ip);
+
+	// Decrement link count and write back to disk
+	ip->nlink--;
+	iupdate(ip);
+
+	// Remove the directory entry from the root directory
+	struct inode *dp = root_dir();
+	dirunlink(dp, path);
+	iput(dp);
+
+	// Release the inode — if nlink == 0 and ref == 1, iput frees it
+	iput(ip);
+	return 0;
 }
 
 extern char trap_page[];
@@ -247,8 +445,19 @@ void syscall()
 		break;
 	case SYS_unlinkat:
 	    ret = sys_unlinkat(args[0],args[1],args[2]);
+		break; // 5a) add break
 	case SYS_spawn:
 		ret = sys_spawn(args[0]);
+		break;
+	// 4) Stride scheduling priority (from project 3)	
+	case SYS_mmap:
+		ret = sys_mmap(args[0], args[1], args[2], args[3], args[4]);
+		break;
+	case SYS_munmap:
+		ret = sys_munmap(args[0], args[1]);
+		break;
+	case SYS_setpriority:
+		ret = sys_set_priority(args[0]);
 		break;
 	default:
 		ret = -1;

@@ -6,6 +6,8 @@
 
 #define NPROC (512)
 #define FD_BUFFER_SIZE (16)
+// 1) size of a user-level stack
+#define BIG_STRIDE 65536
 
 struct file;
 
@@ -45,6 +47,10 @@ struct proc {
 	uint64 exit_code;
 	struct file *files
 		[FD_BUFFER_SIZE]; //File descriptor table, using to record the files opened by the process
+	// 2) for stride scheduling
+	int stride;
+	int pass;
+	long long priority;
 };
 
 int cpuid();

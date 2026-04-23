@@ -45,7 +45,8 @@ struct superblock {
 // On-disk inode structure
 struct dinode {
 	short type; // File type
-	short pad[3];
+	short pad[2]; // 9) Padding to make sizeof(struct dinode) == 64 
+	short nlink; // 9a) Hard link count - making the same change as in the os/fs.h
 	uint size; // Size of file (bytes)
 	uint addrs[NDIRECT + 1]; // Data block addresses
 };
